@@ -1,0 +1,5 @@
+package com.byerudito.bbsydown
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
