@@ -36,6 +36,7 @@ class DownloadScreen extends StatefulWidget {
 
 class _DownloadScreenState extends State<DownloadScreen> {
   final TextEditingController _urlController = TextEditingController();
+  Future<bool>? _permissionRequest;
   String _selectedFormat = 'MP4';
   bool _isDownloading = false;
   double _progress = 0.0;
@@ -50,6 +51,10 @@ class _DownloadScreenState extends State<DownloadScreen> {
   void initState() {
     super.initState();
     _loadDownloadedFiles();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(_requestPermissions());
+    });
   }
 
   // Limpia los parámetros adicionales de la URL como ?si=... o &feature=...
@@ -117,18 +122,34 @@ class _DownloadScreenState extends State<DownloadScreen> {
   }
 
   // ─── Solicitar permisos según versión de Android ─────────────────────────
-  Future<bool> _requestPermissions() async {
-    if (!Platform.isAndroid) return true;
-    final androidInfo = await DeviceInfoPlugin().androidInfo;
-    final sdkInt = androidInfo.version.sdkInt;
+  Future<bool> _requestPermissions() {
+    final activeRequest = _permissionRequest;
+    if (activeRequest != null) return activeRequest;
 
-    if (sdkInt >= 30) {
-      if (await Permission.manageExternalStorage.isGranted) return true;
-      final status = await Permission.manageExternalStorage.request();
+    late final Future<bool> request;
+    request = _requestPermissionsOnce().whenComplete(() {
+      if (identical(_permissionRequest, request)) {
+        _permissionRequest = null;
+      }
+    });
+    _permissionRequest = request;
+    return request;
+  }
+
+  Future<bool> _requestPermissionsOnce() async {
+    if (!Platform.isAndroid) return true;
+
+    try {
+      final androidInfo = await DeviceInfoPlugin().androidInfo;
+      final permission = androidInfo.version.sdkInt >= 30
+          ? Permission.manageExternalStorage
+          : Permission.storage;
+      if (await permission.isGranted) return true;
+
+      final status = await permission.request();
       return status.isGranted;
-    } else {
-      final status = await Permission.storage.request();
-      return status.isGranted;
+    } catch (_) {
+      return false;
     }
   }
 
