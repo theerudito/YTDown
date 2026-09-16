@@ -7,6 +7,8 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:open_file/open_file.dart';
 
+import 'operation_timeout.dart';
+
 void main() {
   runApp(const MyApp());
 }
@@ -83,6 +85,7 @@ class _DownloadScreenState extends State<DownloadScreen> {
       final basePath = await _getBaseDownloadPath();
       final mp4Dir = Directory('$basePath/mp4');
       final mp3Dir = Directory('$basePath/mp3');
+      if (!mounted) return;
       setState(() {
         _mp4Files = mp4Dir.existsSync()
             ? mp4Dir
@@ -140,6 +143,7 @@ class _DownloadScreenState extends State<DownloadScreen> {
     }
 
     final granted = await _requestPermissions();
+    if (!mounted) return;
     if (!granted) {
       setState(() {
         _statusMessage =
@@ -155,6 +159,13 @@ class _DownloadScreenState extends State<DownloadScreen> {
     });
 
     final yt = YoutubeExplode();
+    var ytClosed = false;
+    void closeYoutubeClient() {
+      if (ytClosed) return;
+      yt.close();
+      ytClosed = true;
+    }
+
     bool success = false;
     String savedTitle = '';
     String savedExt = '';
@@ -164,24 +175,27 @@ class _DownloadScreenState extends State<DownloadScreen> {
       final videoId = VideoId.parseVideoId(cleanUrl);
       if (videoId == null) throw Exception('URL de YouTube inválida.');
 
-      final tuple = await Future.any([
-        Future(() async {
-          final videoData = await yt.videos.get(videoId);
-          setState(() => _statusMessage = 'Buscando flujos de datos...');
-          final manifestData = await yt.videos.streamsClient.getManifest(
-            videoId,
-          );
-          return {'video': videoData, 'manifest': manifestData};
-        }),
-        Future.delayed(const Duration(seconds: 15)).then((_) {
-          throw TimeoutException(
-            'Tiempo de espera agotado al analizar el video. Operación cancelada.',
-          );
-        }),
-      ]);
-
-      final video = tuple['video'] as Video;
-      final manifest = tuple['manifest'] as StreamManifest;
+      final video = await withOperationTimeout(
+        yt.videos.get(videoId),
+        duration: const Duration(seconds: 15),
+        message: 'Tiempo de espera agotado al obtener los datos del video.',
+        onTimeout: closeYoutubeClient,
+      );
+      if (!mounted) return;
+      setState(() => _statusMessage = 'Buscando flujos de datos...');
+      final manifestClient = _selectedFormat == 'MP4'
+          ? YoutubeApiClient.androidSdkless
+          : YoutubeApiClient.visionOs;
+      final manifest = await withOperationTimeout(
+        yt.videos.streamsClient.getManifest(
+          videoId,
+          ytClients: [manifestClient],
+        ),
+        duration: const Duration(seconds: 15),
+        message: 'Tiempo de espera agotado al buscar flujos de datos.',
+        onTimeout: closeYoutubeClient,
+      );
+      if (!mounted) return;
       final cleanTitle = video.title.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
 
       StreamInfo? streamInfo;
@@ -213,23 +227,27 @@ class _DownloadScreenState extends State<DownloadScreen> {
       final totalSize = streamInfo.size.totalBytes;
       int downloadedBytes = 0;
 
-      await for (final data in stream) {
-        downloadedBytes += data.length;
-        fileStream.add(data);
-        setState(() {
-          _progress = downloadedBytes / totalSize;
-          _statusMessage =
-              'Descargando: ${(_progress * 100).toStringAsFixed(0)}%\n"$cleanTitle"';
-        });
+      try {
+        await for (final data in stream) {
+          downloadedBytes += data.length;
+          fileStream.add(data);
+          if (!mounted) return;
+          setState(() {
+            _progress = downloadedBytes / totalSize;
+            _statusMessage =
+                'Descargando: ${(_progress * 100).toStringAsFixed(0)}%\n"$cleanTitle"';
+          });
+        }
+        await fileStream.flush();
+      } finally {
+        await fileStream.close();
       }
-
-      await fileStream.flush();
-      await fileStream.close();
 
       success = true;
       savedTitle = cleanTitle;
       savedExt = fileExtension;
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         if (e is TimeoutException) {
           _statusMessage = 'Error:\n${e.message}';
@@ -238,11 +256,13 @@ class _DownloadScreenState extends State<DownloadScreen> {
         }
       });
     } finally {
-      yt.close();
+      closeYoutubeClient();
     }
 
-    if (success && mounted) {
+    if (!mounted) return;
+    if (success) {
       await _loadDownloadedFiles();
+      if (!mounted) return;
       setState(() {
         _isDownloading = false;
         _progress = 0.0;
